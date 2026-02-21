@@ -1,0 +1,6 @@
+# track_data_pipeline.py 의존성
+requests
+pandas
+python-dotenv
+tqdm
+supabase
