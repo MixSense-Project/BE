@@ -1,0 +1,16 @@
+{
+  "catalog_rows": 9891,
+  "release_date_range": {
+    "from": "1945-01-01",
+    "to": "2026-02-10"
+  },
+  "popularity_range": {
+    "min": 0.0,
+    "max": 100.0
+  },
+  "youtube_missing_rate": 0.0,
+  "n_genre": 24,
+  "n_sub_genre": 151,
+  "n_mood": 54,
+  "n_context": 36
+}

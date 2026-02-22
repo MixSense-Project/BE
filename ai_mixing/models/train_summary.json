@@ -1,0 +1,7 @@
+{
+  "num_zips": 16,
+  "num_pairs": 120,
+  "num_transition_samples": 749,
+  "strategy_model": "models/strategy_clf.joblib",
+  "transition_model": "models/transition_reg.joblib"
+}

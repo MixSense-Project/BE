@@ -1,0 +1,30 @@
+# API & HTTP
+requests>=2.31.0
+
+# Data
+pandas>=2.0.0
+
+# Backend & API
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+python-multipart>=0.0.9
+
+# DB & Auth
+supabase>=2.3.0
+
+# Env
+python-dotenv>=1.0.0
+
+# CLI / progress
+tqdm>=4.66.0
+
+# Validation (FastAPI)
+pydantic>=2.5.0
+
+# YouTube (youtube_play.py)
+pywhatkit>=5.4
+
+# Daily ranking batch (daily_ranking_batch.py)
+selenium>=4.17.0
+webdriver-manager>=4.0.1
+spotipy>=2.23.0

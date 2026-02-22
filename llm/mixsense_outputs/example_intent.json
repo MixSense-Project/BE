@@ -1,0 +1,42 @@
+{
+  "intent_type": "SEARCH",
+  "query_text": "비 오는 날 드라이브할 때 잔잔한 R&B",
+  "filters": {
+    "artist_id_in": [],
+    "genre_in": [
+      "R&B"
+    ],
+    "sub_genre_in": [],
+    "mood_tags_in": [
+      "Calm"
+    ],
+    "context_tags_in": [
+      "Drive",
+      "Night"
+    ],
+    "popularity_min": null,
+    "popularity_max": 70,
+    "release_date_from": null,
+    "release_date_to": null,
+    "exclude_artist_ids": [],
+    "exclude_track_ids": []
+  },
+  "ranking_weights": {
+    "w_artist_pref": 0.35,
+    "w_popularity": 0.4,
+    "w_recency": 0.25,
+    "w_mood_match": 0.1,
+    "w_context_match": 0.1
+  },
+  "diversity_rules": {
+    "max_tracks_per_artist": 1
+  },
+  "fallback_plan": [
+    "DROP_CONTEXT",
+    "DROP_MOOD",
+    "WIDEN_POPULARITY",
+    "WIDEN_DATE_RANGE",
+    "DROP_GENRE"
+  ],
+  "confidence": 0.78
+}

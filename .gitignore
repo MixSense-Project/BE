@@ -1,0 +1,37 @@
+# Python
+.venv/
+venv/
+**/.venv/
+**/venv/
+**/__pycache__/
+*.pyc
+.cache/
+
+# Env & secrets
+.env
+
+# Local / binary
+ngrok.exe
+*.csv
+.cache
+
+# OS
+**/.DS_Store
+
+# Build artifact
+**/*.egg-info/
+
+# --- ai_mixing: 백엔드에 불필요 (가상환경, 데이터 캐시, 생성물) ---
+ai_mixing/.venv/
+ai_mixing/data/cache/
+ai_mixing/data/inputs/zips/
+ai_mixing/data/inputs/audio/
+ai_mixing/data/processed/
+ai_mixing/outputs/
+
+# --- ai_recommend: raw 데이터 제외, 코드만 커밋 ---
+ai_recommend/data/raw/
+
+# --- llm: 로컬 전용/생성물 제외 ---
+llm/.env
+llm/.streamlit/
