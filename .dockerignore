@@ -1,0 +1,32 @@
+.env
+.git
+.gitignore
+
+.venv/
+venv/
+**/.venv/
+**/venv/
+**/__pycache__/
+*.pyc
+.cache/
+
+ngrok.exe
+*.log
+*.wav
+*.mp3
+*.tmp
+
+# ai_mixing: 배포 런타임에 불필요한 로컬 자산/캐시
+ai_mixing/.venv/
+ai_mixing/data/cache/
+ai_mixing/data/inputs/
+ai_mixing/data/processed/
+ai_mixing/outputs/
+ai_mixing/scripts/
+
+# ai_recommend: 학습/실험용 raw 데이터 제외
+ai_recommend/data/raw/
+
+# llm: 로컬 설정 제외
+llm/.env
+llm/.streamlit/

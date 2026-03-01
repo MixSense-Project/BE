@@ -14,6 +14,10 @@ venv/
 ngrok.exe
 *.csv
 .cache
+*.log
+*.wav
+*.mp3
+*.tmp
 
 # OS
 **/.DS_Store
@@ -35,3 +39,6 @@ ai_recommend/data/raw/
 # --- llm: 로컬 전용/생성물 제외 ---
 llm/.env
 llm/.streamlit/
+
+# 배포에 필요한 카탈로그는 예외로 포함
+!llm/mixsense_outputs/prepared_catalog.csv

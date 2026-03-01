@@ -274,7 +274,7 @@ def build_home18(meta: pd.DataFrame, seen: pd.DataFrame, profile: dict):
     artist_cnt = Counter()
 
     # Repeat
-    rep = seen[["track_id", "title", "artist", "artist_id", "popularity", "release_date", "youtube_video_id"]].copy()
+    rep = seen[["track_id", "title", "artist", "artist_id", "popularity", "release_date", "youtube_video_id", "track_image_url"]].copy()
     rep["pop_norm"] = norm01(rep["popularity"].fillna(0))
     rep["rec_ts"] = safe_int64_datetime(rep["release_date"])
     rep["rec_norm"] = norm01(rep["rec_ts"])
@@ -316,6 +316,7 @@ def build_home18(meta: pd.DataFrame, seen: pd.DataFrame, profile: dict):
             "title": r["title"],
             "popularity": float(r.get("popularity", 0)),
             "youtube_video_id": r.get("youtube_video_id", None),
+            "track_image_url": r.get("track_image_url", None),
         })
     return home
 

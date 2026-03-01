@@ -30,7 +30,9 @@ PLAYLIST_URL = "https://open.spotify.com/playlist/37i9dQZEVXbMDoHDwVN2tF"
 def crawl_playlist_tracks(url):
     """Selenium으로 플레이리스트 페이지에서 순위와 track_id 추출"""
     chrome_options = Options()
-    #chrome_options.add_argument("--headless")
+    headless_enabled = os.getenv("DAILY_BATCH_HEADLESS", "1").strip().lower() not in {"0", "false", "no"}
+    if headless_enabled:
+        chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--window-size=1920,1080")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
@@ -38,8 +40,16 @@ def crawl_playlist_tracks(url):
     chrome_options.add_argument("--log-level=3")  # Fatal 에러 외 로그 무시
     chrome_options.add_experimental_option("excludeSwitches", ["enable-logging"]) # 로그 출력 제외
     chrome_options.add_argument("--disable-blink-features=AutomationControlled") # 자동화 도구 감지 우회
-    
-    service = Service(ChromeDriverManager().install())
+
+    chrome_binary = os.getenv("CHROME_BIN")
+    if chrome_binary:
+        chrome_options.binary_location = chrome_binary
+
+    chromedriver_path = os.getenv("CHROMEDRIVER_PATH")
+    if chromedriver_path and os.path.exists(chromedriver_path):
+        service = Service(chromedriver_path)
+    else:
+        service = Service(ChromeDriverManager().install())
     driver = webdriver.Chrome(service=service, options=chrome_options)
     
     try:

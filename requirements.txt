@@ -3,6 +3,8 @@ requests>=2.31.0
 
 # Data
 pandas>=2.0.0
+numpy>=1.26.0
+scipy>=1.11.0
 
 # Backend & API
 fastapi>=0.109.0
@@ -28,3 +30,12 @@ pywhatkit>=5.4
 selenium>=4.17.0
 webdriver-manager>=4.0.1
 spotipy>=2.23.0
+
+# AI mixing / model utils
+librosa>=0.10.0
+soundfile>=0.12.1
+scikit-learn>=1.3.0
+joblib>=1.3.0
+
+# LLM parser
+openai>=1.30.0
