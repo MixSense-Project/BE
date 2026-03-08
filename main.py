@@ -7,7 +7,7 @@ import shutil
 import requests
 import pandas as pd
 from pathlib import Path
-from fastapi import FastAPI, BackgroundTasks, HTTPException, Header, Depends, UploadFile, File, Query, Form
+from fastapi import FastAPI, BackgroundTasks, HTTPException, Header, Depends, UploadFile, File, Query, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, AliasChoices
 from typing import List, Optional, Any, Literal
@@ -26,6 +26,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")  # service_role (DB/관리용)
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
 PLAYLIST_COVER_BUCKET = os.getenv("PLAYLIST_COVER_BUCKET", "playlist_covers")
 MIX_TRACKS_BUCKET = os.getenv("MIX_TRACKS_BUCKET", "mix_tracks")
+MIX_SOURCE_TRACKS_BUCKET = os.getenv("MIX_SOURCE_TRACKS_BUCKET", "mix_source_tracks")
 AI_MIX_MAX_UPLOAD_BYTES = int(os.getenv("AI_MIX_MAX_UPLOAD_BYTES", str(200 * 1024 * 1024)))  # 200MB
 AI_MIX_ALLOWED_MIME_TYPES = {
     "application/zip",
@@ -1186,10 +1187,72 @@ async def _save_upload_as_temp_zip(upload: UploadFile, max_bytes: int) -> str:
     return temp_path
 
 
+def _download_zip_to_temp(url: str, max_bytes: int, label: str) -> str:
+    total = 0
+    with requests.get(url, stream=True, timeout=60) as res:
+        if res.status_code != 200:
+            raise HTTPException(status_code=400, detail=f"Failed to download {label} zip: {res.status_code}")
+        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as f:
+            temp_path = f.name
+            for chunk in res.iter_content(chunk_size=1024 * 1024):
+                if not chunk:
+                    continue
+                total += len(chunk)
+                if total > max_bytes:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Download size exceeds limit ({max_bytes // (1024 * 1024)}MB): {label}",
+                    )
+                f.write(chunk)
+    return temp_path
+
+
+def _resolve_mix_source_track_zip_temp(mix_track_id: str, max_bytes: int) -> tuple[str, Optional[str]]:
+    resolved_mix_track_id = (mix_track_id or "").strip()
+    if not resolved_mix_track_id:
+        raise HTTPException(status_code=400, detail="mix_track_id is required")
+
+    response = (
+        supabase.table("mix_source_track")
+        .select("*")
+        .eq("mix_track_id", resolved_mix_track_id)
+        .limit(1)
+        .execute()
+    )
+    if not response.data:
+        raise HTTPException(status_code=404, detail=f"mix_track_id not found: {resolved_mix_track_id}")
+
+    row = response.data[0] or {}
+    row_track_id = (row.get("track_id") or "").strip() or None
+
+    zip_source_value = None
+    for key in ["zip_url", "source_zip_url", "stems_zip_url", "zip_path", "source_zip_path", "stems_zip_path"]:
+        val = row.get(key)
+        if isinstance(val, str) and val.strip():
+            zip_source_value = val.strip()
+            break
+
+    if not zip_source_value:
+        raise HTTPException(
+            status_code=400,
+            detail=f"mix_source_track({resolved_mix_track_id}) must have one of zip_url/zip_path/source_zip_url/source_zip_path/stems_zip_url/stems_zip_path",
+        )
+
+    if zip_source_value.startswith("http://") or zip_source_value.startswith("https://"):
+        return _download_zip_to_temp(zip_source_value, max_bytes=max_bytes, label=f"mix_track_id={resolved_mix_track_id}"), row_track_id
+
+    if os.path.isabs(zip_source_value) and os.path.exists(zip_source_value):
+        return zip_source_value, row_track_id
+
+    public_url = supabase.storage.from_(MIX_SOURCE_TRACKS_BUCKET).get_public_url(zip_source_value.lstrip("/"))
+    return _download_zip_to_temp(public_url, max_bytes=max_bytes, label=f"mix_track_id={resolved_mix_track_id}"), row_track_id
+
+
 @app.post("/api/ai/mix")
 async def api_ai_mix(
-    zip1: UploadFile = File(...),
-    zip2: UploadFile = File(...),
+    request: Request,
+    zip1: Optional[UploadFile] = File(default=None),
+    zip2: Optional[UploadFile] = File(default=None),
     target_duration: float = 150.0,
     target_k: int = 5,
     source_track_id_1: Optional[str] = Form(default=None),
@@ -1203,12 +1266,45 @@ async def api_ai_mix(
     except ImportError as e:
         raise HTTPException(status_code=503, detail=f"AI Mixing module not found: {e}")
     
-    _validate_ai_mix_inputs(zip1, zip2, target_duration, target_k)
+    if target_duration < 30 or target_duration > 300:
+        raise HTTPException(status_code=400, detail="target_duration must be between 30 and 300 seconds")
+    if target_k < 1 or target_k > 12:
+        raise HTTPException(status_code=400, detail="target_k must be between 1 and 12")
 
     tmp1 = tmp2 = out_dir = None
     try:
-        tmp1 = await _save_upload_as_temp_zip(zip1, max_bytes=AI_MIX_MAX_UPLOAD_BYTES)
-        tmp2 = await _save_upload_as_temp_zip(zip2, max_bytes=AI_MIX_MAX_UPLOAD_BYTES)
+        resolved_source_track_id_1 = (source_track_id_1 or "").strip() or None
+        resolved_source_track_id_2 = (source_track_id_2 or "").strip() or None
+
+        if zip1 and zip2:
+            _validate_ai_mix_inputs(zip1, zip2, target_duration, target_k)
+            tmp1 = await _save_upload_as_temp_zip(zip1, max_bytes=AI_MIX_MAX_UPLOAD_BYTES)
+            tmp2 = await _save_upload_as_temp_zip(zip2, max_bytes=AI_MIX_MAX_UPLOAD_BYTES)
+        elif (zip1 and not zip2) or (zip2 and not zip1):
+            raise HTTPException(status_code=400, detail="zip1 and zip2 must be provided together")
+        else:
+            form = await request.form()
+            mix_track_id_1 = str(form.get("mix_track_id_1") or form.get("source_mix_track_id_1") or form.get("zip1") or "").strip()
+            mix_track_id_2 = str(form.get("mix_track_id_2") or form.get("source_mix_track_id_2") or form.get("zip2") or "").strip()
+
+            if not (mix_track_id_1 and mix_track_id_2):
+                try:
+                    payload = await request.json()
+                except Exception:
+                    payload = {}
+                mix_track_id_1 = mix_track_id_1 or str(payload.get("mix_track_id_1") or payload.get("source_mix_track_id_1") or payload.get("zip1") or "").strip()
+                mix_track_id_2 = mix_track_id_2 or str(payload.get("mix_track_id_2") or payload.get("source_mix_track_id_2") or payload.get("zip2") or "").strip()
+
+            if not (mix_track_id_1 and mix_track_id_2):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Provide either zip1/zip2 files OR two source IDs (mix_track_id_1/mix_track_id_2).",
+                )
+
+            tmp1, inferred_track_id_1 = _resolve_mix_source_track_zip_temp(mix_track_id_1, max_bytes=AI_MIX_MAX_UPLOAD_BYTES)
+            tmp2, inferred_track_id_2 = _resolve_mix_source_track_zip_temp(mix_track_id_2, max_bytes=AI_MIX_MAX_UPLOAD_BYTES)
+            resolved_source_track_id_1 = resolved_source_track_id_1 or inferred_track_id_1
+            resolved_source_track_id_2 = resolved_source_track_id_2 or inferred_track_id_2
 
         out_dir = tempfile.mkdtemp()
         result = run_mix(tmp1, tmp2, out_dir=out_dir, data_dir=out_dir, target_duration=target_duration, target_k=target_k)
@@ -1247,8 +1343,8 @@ async def api_ai_mix(
                     "mix_audio_path": file_name,
                     "log_json_url": log_public_url,
                     "log_json_path": log_storage_path,
-                    "source_track_id_1": (source_track_id_1 or "").strip() or None,
-                    "source_track_id_2": (source_track_id_2 or "").strip() or None,
+                    "source_track_id_1": resolved_source_track_id_1,
+                    "source_track_id_2": resolved_source_track_id_2,
                     "target_duration_sec": float(target_duration),
                     "used_k": int(result.used_k),
                 })
