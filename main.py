@@ -1123,6 +1123,35 @@ def api_ai_recommend_autoplay(current_track_id: str, k: int = 10, user_id: str =
 # ==========================================
 # 12. AI Mixing
 # ==========================================
+@app.get("/api/ai/mix/source-tracks")
+def get_ai_mix_source_tracks(
+    limit: int = 50,
+    keyword: Optional[str] = Query(None),
+):
+    """AI 믹싱용 소스 트랙 목록을 조회합니다."""
+    safe_limit = max(1, min(200, int(limit)))
+    query = supabase.table("mix_source_track").select("*")
+    if keyword and keyword.strip():
+        query = query.ilike("title", f"%{keyword.strip()}%")
+    response = query.limit(safe_limit).execute()
+    return {"source_tracks": response.data or []}
+
+
+@app.get("/api/ai/mix/source-tracks/{mix_track_id}")
+def get_ai_mix_source_track_detail(mix_track_id: str):
+    """AI 믹싱용 소스 트랙 상세를 조회합니다."""
+    response = (
+        supabase.table("mix_source_track")
+        .select("*")
+        .eq("mix_track_id", mix_track_id)
+        .limit(1)
+        .execute()
+    )
+    if not response.data:
+        raise HTTPException(status_code=404, detail="mix_track_id not found in mix_source_track")
+    return {"source_track": response.data[0]}
+
+
 def _validate_ai_mix_inputs(zip1: UploadFile, zip2: UploadFile, target_duration: float, target_k: int):
     if target_duration < 30 or target_duration > 300:
         raise HTTPException(status_code=400, detail="target_duration must be between 30 and 300 seconds")
