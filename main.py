@@ -7,7 +7,7 @@ import shutil
 import requests
 import pandas as pd
 from pathlib import Path
-from fastapi import FastAPI, BackgroundTasks, HTTPException, Header, Depends, UploadFile, File, Query
+from fastapi import FastAPI, BackgroundTasks, HTTPException, Header, Depends, UploadFile, File, Query, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, AliasChoices
 from typing import List, Optional, Any, Literal
@@ -181,7 +181,8 @@ class PlaylistUpdateReq(BaseModel):
     title: str
 
 class PlaylistTrackReq(BaseModel):
-    track_id: str
+    track_id: Optional[str] = Field(default=None, validation_alias=AliasChoices("track_id", "trackId"))
+    mix_id: Optional[str] = Field(default=None, validation_alias=AliasChoices("mix_id", "mixId"))
 
 class PlaylistCoverUploadUrlReq(BaseModel):
     filename: str
@@ -762,26 +763,111 @@ def delete_playlist(playlist_id: str, user_id: str = Depends(verify_user)):
 # ==========================================
 @app.post("/api/playlists/{playlist_id}/tracks")
 def add_track_to_playlist(playlist_id: str, req: PlaylistTrackReq, user_id: str = Depends(verify_user)):
-    """특정 플레이리스트에 곡을 추가합니다."""
+    """특정 플레이리스트에 일반 곡(track) 또는 AI 믹스(mix)를 추가합니다."""
     # 플레이리스트 소유권 1차 검증
     playlist_check = supabase.table("playlist").select("playlist_id").eq("playlist_id", playlist_id).eq("user_id", user_id).execute()
     if not playlist_check.data:
         raise HTTPException(status_code=403, detail="Playlist ownership verification failed")
-    # user_id 컬럼 제외 후 삽입
-    response = supabase.table("playlist_tracks").insert({
-        "playlist_id": playlist_id,
-        "track_id": req.track_id
-    }).execute()
-    return {"status": "added", "data": response.data}
+
+    track_id = (req.track_id or "").strip()
+    mix_id = (req.mix_id or "").strip()
+    if bool(track_id) == bool(mix_id):
+        raise HTTPException(status_code=400, detail="Exactly one of track_id or mix_id is required")
+
+    if track_id:
+        track_check = supabase.table("track").select("track_id").eq("track_id", track_id).limit(1).execute()
+        if not track_check.data:
+            raise HTTPException(status_code=404, detail="track_id not found in track table")
+        insert_payload = {"playlist_id": playlist_id, "track_id": track_id}
+    else:
+        mix_check = (
+            supabase.table("ai_mix")
+            .select("mix_id")
+            .eq("mix_id", mix_id)
+            .eq("user_id", user_id)
+            .limit(1)
+            .execute()
+        )
+        if not mix_check.data:
+            raise HTTPException(status_code=404, detail="mix_id not found for current user")
+        insert_payload = {"playlist_id": playlist_id, "mix_id": mix_id, "track_id": None}
+
+    response = supabase.table("playlist_tracks").insert(insert_payload).execute()
+    return {"status": "added", "item_type": "track" if track_id else "mix", "data": response.data}
 
 @app.get("/api/playlists/{playlist_id}/tracks")
 def get_playlist_tracks(playlist_id: str, user_id: str = Depends(verify_user)):
-    """특정 플레이리스트에 포함된 곡 목록과 메타데이터를 조회합니다."""
+    """특정 플레이리스트에 포함된 곡/AI 믹스 목록과 메타데이터를 조회합니다."""
     playlist_check = supabase.table("playlist").select("playlist_id").eq("playlist_id", playlist_id).eq("user_id", user_id).execute()
     if not playlist_check.data:
         raise HTTPException(status_code=403, detail="Playlist ownership verification failed")
-    response = supabase.table("playlist_tracks").select("*, track(*)").eq("playlist_id", playlist_id).order("added_at", desc=False).execute()
-    return {"playlist_tracks": response.data}
+
+    # 하위호환: mix_id 컬럼이 아직 없는 스키마도 동작하도록 fallback합니다.
+    try:
+        response = (
+            supabase.table("playlist_tracks")
+            .select("playlist_track_id, playlist_id, track_id, mix_id, added_at")
+            .eq("playlist_id", playlist_id)
+            .order("added_at", desc=False)
+            .execute()
+        )
+        rows = response.data or []
+    except Exception:
+        response = (
+            supabase.table("playlist_tracks")
+            .select("playlist_track_id, playlist_id, track_id, added_at")
+            .eq("playlist_id", playlist_id)
+            .order("added_at", desc=False)
+            .execute()
+        )
+        rows = [{**r, "mix_id": None} for r in (response.data or [])]
+
+    track_ids = [str(r.get("track_id")) for r in rows if r.get("track_id")]
+    mix_ids = [str(r.get("mix_id")) for r in rows if r.get("mix_id")]
+
+    track_map = {}
+    if track_ids:
+        track_res = (
+            supabase.table("track")
+            .select("track_id, title, artist, youtube_video_id, track_image_url")
+            .in_("track_id", list({tid for tid in track_ids if tid}))
+            .execute()
+        )
+        for t in (track_res.data or []):
+            tid = str(t.get("track_id") or "")
+            if tid:
+                track_map[tid] = t
+
+    mix_map = {}
+    if mix_ids:
+        mix_res = (
+            supabase.table("ai_mix")
+            .select("mix_id, user_id, title, mix_audio_url, mix_audio_path, log_json_url, log_json_path, source_track_id_1, source_track_id_2, created_at")
+            .eq("user_id", user_id)
+            .in_("mix_id", list({mid for mid in mix_ids if mid}))
+            .execute()
+        )
+        for m in (mix_res.data or []):
+            mid = str(m.get("mix_id") or "")
+            if mid:
+                mix_map[mid] = m
+
+    playlist_items = []
+    for r in rows:
+        tid = str(r.get("track_id") or "")
+        mid = str(r.get("mix_id") or "")
+        playlist_items.append({
+            "playlist_track_id": r.get("playlist_track_id"),
+            "playlist_id": r.get("playlist_id"),
+            "track_id": tid or None,
+            "mix_id": mid or None,
+            "item_type": "mix" if mid else "track",
+            "added_at": r.get("added_at"),
+            "track": track_map.get(tid) if tid else None,
+            "mix": mix_map.get(mid) if mid else None,
+        })
+
+    return {"playlist_tracks": playlist_items}
 
 @app.delete("/api/playlists/{playlist_id}/tracks/{track_id}")
 def remove_track_from_playlist(playlist_id: str, track_id: str, user_id: str = Depends(verify_user)):
@@ -792,6 +878,15 @@ def remove_track_from_playlist(playlist_id: str, track_id: str, user_id: str = D
         raise HTTPException(status_code=403, detail="Playlist ownership verification failed")
     # user_id 조건 제외 후 삭제 실행
     supabase.table("playlist_tracks").delete().eq("playlist_id", playlist_id).eq("track_id", track_id).execute()
+    return {"status": "deleted"}
+
+@app.delete("/api/playlists/{playlist_id}/mixes/{mix_id}")
+def remove_mix_from_playlist(playlist_id: str, mix_id: str, user_id: str = Depends(verify_user)):
+    """특정 플레이리스트에서 AI 믹스를 제외합니다."""
+    playlist_check = supabase.table("playlist").select("playlist_id").eq("playlist_id", playlist_id).eq("user_id", user_id).execute()
+    if not playlist_check.data:
+        raise HTTPException(status_code=403, detail="Playlist ownership verification failed")
+    supabase.table("playlist_tracks").delete().eq("playlist_id", playlist_id).eq("mix_id", mix_id).execute()
     return {"status": "deleted"}
 
 # ==========================================
@@ -1068,6 +1163,11 @@ async def api_ai_mix(
     zip2: UploadFile = File(...),
     target_duration: float = 150.0,
     target_k: int = 5,
+    source_track_id_1: Optional[str] = Form(default=None),
+    source_track_id_2: Optional[str] = Form(default=None),
+    mix_title: Optional[str] = Form(default=None),
+    save_result: bool = Form(default=True),
+    user_id: str = Depends(verify_user),
 ):
     try:
         from mixsense_mixing import run_mix
@@ -1103,7 +1203,33 @@ async def api_ai_mix(
             )
         log_public_url = supabase.storage.from_(MIX_TRACKS_BUCKET).get_public_url(log_storage_path)
         
+        mix_id = None
+        if save_result:
+            default_title = "AI mix"
+            if source_track_id_1 and source_track_id_2:
+                default_title = f"{source_track_id_1} x {source_track_id_2} AI mix"
+            resolved_title = (mix_title or "").strip() or default_title
+            save_res = (
+                supabase.table("ai_mix")
+                .insert({
+                    "user_id": user_id,
+                    "title": resolved_title,
+                    "mix_audio_url": public_url,
+                    "mix_audio_path": file_name,
+                    "log_json_url": log_public_url,
+                    "log_json_path": log_storage_path,
+                    "source_track_id_1": (source_track_id_1 or "").strip() or None,
+                    "source_track_id_2": (source_track_id_2 or "").strip() or None,
+                    "target_duration_sec": float(target_duration),
+                    "used_k": int(result.used_k),
+                })
+                .execute()
+            )
+            mix_id = (save_res.data or [{}])[0].get("mix_id")
+
         return {
+            "mix_id": mix_id,
+            "saved": bool(save_result),
             "mix_audio_url": public_url,
             "log_json_path": log_storage_path,
             "log_json_url": log_public_url,
@@ -1132,6 +1258,72 @@ async def api_ai_mix(
                 shutil.rmtree(out_dir)
             except OSError:
                 pass
+
+def _enrich_ai_mix_rows_with_source_tracks(mix_rows: List[dict]) -> List[dict]:
+    source_track_ids = set()
+    for row in mix_rows:
+        tid1 = str(row.get("source_track_id_1") or "").strip()
+        tid2 = str(row.get("source_track_id_2") or "").strip()
+        if tid1:
+            source_track_ids.add(tid1)
+        if tid2:
+            source_track_ids.add(tid2)
+
+    track_map = {}
+    if source_track_ids:
+        src_track_res = (
+            supabase.table("track")
+            .select("track_id, title, artist, track_image_url, youtube_video_id")
+            .in_("track_id", list(source_track_ids))
+            .execute()
+        )
+        for tr in (src_track_res.data or []):
+            tid = str(tr.get("track_id") or "")
+            if tid:
+                track_map[tid] = tr
+
+    enriched = []
+    for row in mix_rows:
+        tid1 = str(row.get("source_track_id_1") or "").strip()
+        tid2 = str(row.get("source_track_id_2") or "").strip()
+        source_tracks = []
+        if tid1:
+            source_tracks.append(track_map.get(tid1) or {"track_id": tid1})
+        if tid2:
+            source_tracks.append(track_map.get(tid2) or {"track_id": tid2})
+        enriched.append({**row, "source_tracks": source_tracks})
+    return enriched
+
+@app.get("/api/ai/mixes")
+def get_my_ai_mixes(limit: int = 20, user_id: str = Depends(verify_user)):
+    """현재 유저가 생성한 AI 믹스 목록을 조회합니다."""
+    safe_limit = max(1, min(100, int(limit)))
+    response = (
+        supabase.table("ai_mix")
+        .select("mix_id, user_id, title, mix_audio_url, mix_audio_path, log_json_url, log_json_path, source_track_id_1, source_track_id_2, target_duration_sec, used_k, created_at")
+        .eq("user_id", user_id)
+        .order("created_at", desc=True)
+        .limit(safe_limit)
+        .execute()
+    )
+    rows = response.data or []
+    return {"mixes": _enrich_ai_mix_rows_with_source_tracks(rows)}
+
+@app.get("/api/ai/mixes/{mix_id}")
+def get_ai_mix_detail(mix_id: str, user_id: str = Depends(verify_user)):
+    """특정 AI 믹스 상세를 조회합니다."""
+    response = (
+        supabase.table("ai_mix")
+        .select("mix_id, user_id, title, mix_audio_url, mix_audio_path, log_json_url, log_json_path, source_track_id_1, source_track_id_2, target_duration_sec, used_k, created_at")
+        .eq("mix_id", mix_id)
+        .eq("user_id", user_id)
+        .limit(1)
+        .execute()
+    )
+    if not response.data:
+        raise HTTPException(status_code=404, detail="mix_id not found for current user")
+    enriched = _enrich_ai_mix_rows_with_source_tracks(response.data or [])
+    return {"mix": enriched[0]}
 
 # ==========================================
 # 13. Search History APIs
