@@ -26,7 +26,9 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")  # service_role (DB/관리용)
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
 PLAYLIST_COVER_BUCKET = os.getenv("PLAYLIST_COVER_BUCKET", "playlist_covers")
 MIX_TRACKS_BUCKET = os.getenv("MIX_TRACKS_BUCKET", "mix_tracks")
-MIX_SOURCE_TRACKS_BUCKET = os.getenv("MIX_SOURCE_TRACKS_BUCKET", "mix_source_tracks")
+MIX_SOURCE_TRACKS_BUCKET = os.getenv("MIX_SOURCE_TRACKS_BUCKET", "mix_assets")
+MIX_SOURCE_TRACKS_PREFIX = os.getenv("MIX_SOURCE_TRACKS_PREFIX", "sources")
+MIX_SOURCE_TRACKS_FILENAME = os.getenv("MIX_SOURCE_TRACKS_FILENAME", "source.zip")
 AI_MIX_MAX_UPLOAD_BYTES = int(os.getenv("AI_MIX_MAX_UPLOAD_BYTES", str(200 * 1024 * 1024)))  # 200MB
 AI_MIX_ALLOWED_MIME_TYPES = {
     "application/zip",
@@ -1207,6 +1209,34 @@ def _download_zip_to_temp(url: str, max_bytes: int, label: str) -> str:
     return temp_path
 
 
+def _download_storage_zip_to_temp(bucket: str, object_path: str, max_bytes: int, label: str) -> str:
+    normalized_path = object_path.strip().lstrip("/")
+    if not normalized_path:
+        raise HTTPException(status_code=400, detail=f"Empty storage path for {label}")
+
+    try:
+        content = supabase.storage.from_(bucket).download(normalized_path)
+        if isinstance(content, (bytes, bytearray)):
+            data = bytes(content)
+        elif hasattr(content, "read"):
+            data = content.read()
+        else:
+            data = b""
+        if not data:
+            raise RuntimeError("empty content")
+        if len(data) > max_bytes:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Download size exceeds limit ({max_bytes // (1024 * 1024)}MB): {label}",
+            )
+        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as f:
+            f.write(data)
+            return f.name
+    except Exception:
+        public_url = supabase.storage.from_(bucket).get_public_url(normalized_path)
+        return _download_zip_to_temp(public_url, max_bytes=max_bytes, label=label)
+
+
 def _resolve_mix_source_track_zip_temp(mix_track_id: str, max_bytes: int) -> tuple[str, Optional[str]]:
     resolved_mix_track_id = (mix_track_id or "").strip()
     if not resolved_mix_track_id:
@@ -1233,10 +1263,8 @@ def _resolve_mix_source_track_zip_temp(mix_track_id: str, max_bytes: int) -> tup
             break
 
     if not zip_source_value:
-        raise HTTPException(
-            status_code=400,
-            detail=f"mix_source_track({resolved_mix_track_id}) must have one of zip_url/zip_path/source_zip_url/source_zip_path/stems_zip_url/stems_zip_path",
-        )
+        # DB에 경로 컬럼이 없어도 storage 규칙 경로로 fallback 합니다.
+        zip_source_value = f"{MIX_SOURCE_TRACKS_PREFIX.strip('/')}/{resolved_mix_track_id}/{MIX_SOURCE_TRACKS_FILENAME}"
 
     if zip_source_value.startswith("http://") or zip_source_value.startswith("https://"):
         return _download_zip_to_temp(zip_source_value, max_bytes=max_bytes, label=f"mix_track_id={resolved_mix_track_id}"), row_track_id
@@ -1244,8 +1272,12 @@ def _resolve_mix_source_track_zip_temp(mix_track_id: str, max_bytes: int) -> tup
     if os.path.isabs(zip_source_value) and os.path.exists(zip_source_value):
         return zip_source_value, row_track_id
 
-    public_url = supabase.storage.from_(MIX_SOURCE_TRACKS_BUCKET).get_public_url(zip_source_value.lstrip("/"))
-    return _download_zip_to_temp(public_url, max_bytes=max_bytes, label=f"mix_track_id={resolved_mix_track_id}"), row_track_id
+    return _download_storage_zip_to_temp(
+        MIX_SOURCE_TRACKS_BUCKET,
+        zip_source_value,
+        max_bytes=max_bytes,
+        label=f"mix_track_id={resolved_mix_track_id}",
+    ), row_track_id
 
 
 @app.post("/api/ai/mix")
