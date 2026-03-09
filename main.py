@@ -1233,8 +1233,33 @@ def _download_storage_zip_to_temp(bucket: str, object_path: str, max_bytes: int,
             f.write(data)
             return f.name
     except Exception:
-        public_url = supabase.storage.from_(bucket).get_public_url(normalized_path)
-        return _download_zip_to_temp(public_url, max_bytes=max_bytes, label=label)
+        # SDK 다운로드가 실패하면 service key 인증으로 REST 다운로드를 시도합니다.
+        encoded_parts = [requests.utils.quote(part, safe="") for part in normalized_path.split("/") if part]
+        endpoint = f"{SUPABASE_URL}/storage/v1/object/{bucket}/" + "/".join(encoded_parts)
+        headers = {
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+        }
+        with requests.get(endpoint, headers=headers, stream=True, timeout=60) as res:
+            if res.status_code != 200:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Failed to download {label} zip: {res.status_code}",
+                )
+            total = 0
+            with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as f:
+                temp_path = f.name
+                for chunk in res.iter_content(chunk_size=1024 * 1024):
+                    if not chunk:
+                        continue
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Download size exceeds limit ({max_bytes // (1024 * 1024)}MB): {label}",
+                        )
+                    f.write(chunk)
+        return temp_path
 
 
 def _resolve_mix_source_track_zip_temp(mix_track_id: str, max_bytes: int) -> tuple[str, Optional[str]]:
