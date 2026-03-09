@@ -1305,6 +1305,17 @@ def _resolve_mix_source_track_zip_temp(mix_track_id: str, max_bytes: int) -> tup
     ), row_track_id
 
 
+def _to_int_scalar(value, default: int = 0) -> int:
+    try:
+        if hasattr(value, "item"):
+            return int(value.item())
+        if isinstance(value, (list, tuple)):
+            return int(value[0]) if value else int(default)
+        return int(value)
+    except Exception:
+        return int(default)
+
+
 @app.post("/api/ai/mix")
 async def api_ai_mix(
     request: Request,
@@ -1386,6 +1397,7 @@ async def api_ai_mix(
         log_public_url = supabase.storage.from_(MIX_TRACKS_BUCKET).get_public_url(log_storage_path)
         
         mix_id = None
+        used_k_value = _to_int_scalar(getattr(result, "used_k", 0), default=0)
         if save_result:
             default_title = "AI mix"
             if source_track_id_1 and source_track_id_2:
@@ -1403,7 +1415,7 @@ async def api_ai_mix(
                     "source_track_id_1": resolved_source_track_id_1,
                     "source_track_id_2": resolved_source_track_id_2,
                     "target_duration_sec": float(target_duration),
-                    "used_k": int(result.used_k),
+                    "used_k": used_k_value,
                 })
                 .execute()
             )
@@ -1415,7 +1427,7 @@ async def api_ai_mix(
             "mix_audio_url": public_url,
             "log_json_path": log_storage_path,
             "log_json_url": log_public_url,
-            "used_k": result.used_k,
+            "used_k": used_k_value,
             "events": [{"t_sec": e.t_sec, "mode": e.mode} for e in result.events],
         }
     except HTTPException:

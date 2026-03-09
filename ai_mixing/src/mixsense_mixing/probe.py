@@ -6,6 +6,19 @@ from .silence import activity_ratio
 from .types import TrackFeatures
 
 
+def _to_float_scalar(value, default: float = 0.0) -> float:
+    """numpy array/스칼라를 안전하게 float 스칼라로 변환합니다."""
+    try:
+        arr = np.asarray(value)
+        if arr.ndim == 0:
+            return float(arr)
+        if arr.size == 0:
+            return float(default)
+        return float(np.median(arr.astype(float)))
+    except Exception:
+        return float(default)
+
+
 def sanitize_beat_times(beat_times):
     if beat_times is None:
         return np.asarray([], dtype=float)
@@ -28,7 +41,7 @@ def estimate_bpm_and_beats(y: np.ndarray, sr: int, probe_windows=((10, 55), (60,
         if len(seg) < sr * 10:
             continue
         tempo, beats = librosa.beat.beat_track(y=seg, sr=sr, units="time")
-        bpms.append(float(tempo))
+        bpms.append(_to_float_scalar(tempo, default=0.0))
         if beats is not None and len(beats) > 0:
             beat_times_all.append(beats + a)
     bpm = float(np.median(bpms)) if bpms else 0.0
