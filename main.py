@@ -855,6 +855,59 @@ def get_playlist_tracks(playlist_id: str, user_id: str = Depends(verify_user)):
             if mid:
                 mix_map[mid] = m
 
+    # title이 비어있거나 "AI mix"인 믹스의 source track 제목을 일괄 조회
+    _src_ids_to_resolve: set[str] = set()
+    for m in mix_map.values():
+        stored_title = (m.get("title") or "").strip()
+        if not stored_title or stored_title.lower() in ("ai mix", "ai dj mix"):
+            for key in ("source_track_id_1", "source_track_id_2"):
+                sid = str(m.get(key) or "").strip()
+                if sid:
+                    _src_ids_to_resolve.add(sid)
+
+    _src_title_cache: dict[str, str] = {}
+    if _src_ids_to_resolve:
+        try:
+            _mst_res = supabase.table("mix_source_track").select("mix_track_id, title").in_("mix_track_id", list(_src_ids_to_resolve)).execute()
+            for row in (_mst_res.data or []):
+                _sid = str(row.get("mix_track_id") or "")
+                _t = (row.get("title") or "").strip()
+                if _sid and _t:
+                    _src_title_cache[_sid] = _t
+        except Exception:
+            pass
+        remaining = _src_ids_to_resolve - set(_src_title_cache.keys())
+        if remaining:
+            try:
+                _trk_res = supabase.table("track").select("track_id, title").in_("track_id", list(remaining)).execute()
+                for row in (_trk_res.data or []):
+                    _sid = str(row.get("track_id") or "")
+                    _t = (row.get("title") or "").strip()
+                    if _sid and _t:
+                        _src_title_cache[_sid] = _t
+            except Exception:
+                pass
+
+    def _resolve_mix_title(mix_data: dict) -> str:
+        stored = (mix_data.get("title") or "").strip()
+        if stored and stored.lower() not in ("ai mix", "ai dj mix"):
+            for suffix in (" AI mix", " AI Mix", " AI MIX", " ai mix"):
+                if stored.endswith(suffix) and len(stored) > len(suffix):
+                    stored = stored[:-len(suffix)].strip()
+                    break
+            return stored
+        s1 = str(mix_data.get("source_track_id_1") or "").strip()
+        s2 = str(mix_data.get("source_track_id_2") or "").strip()
+        t1 = _src_title_cache.get(s1, "")
+        t2 = _src_title_cache.get(s2, "")
+        if t1 and t2:
+            return f"{t1} X {t2}"
+        if t1:
+            return t1
+        if t2:
+            return t2
+        return stored or "AI Mix"
+
     playlist_items = []
     for r in rows:
         tid = str(r.get("track_id") or "")
@@ -864,9 +917,10 @@ def get_playlist_tracks(playlist_id: str, user_id: str = Depends(verify_user)):
         mix_data = mix_map.get(mid) if mid else None
 
         if is_mix and mix_data:
-            title = mix_data.get("title") or "AI Mix"
+            title = _resolve_mix_title(mix_data)
             artist = "AI DJ"
             mix_audio_url = mix_data.get("mix_audio_url")
+            mix_data["title"] = title
         elif track_data:
             title = track_data.get("title")
             artist = track_data.get("artist")
@@ -1447,13 +1501,13 @@ async def api_ai_mix(
                     except Exception:
                         pass
 
-            default_title = "AI mix"
+            default_title = "AI Mix"
             if src_title_1 and src_title_2:
-                default_title = f"{src_title_1} X {src_title_2} AI mix"
+                default_title = f"{src_title_1} X {src_title_2}"
             elif src_title_1:
-                default_title = f"{src_title_1} AI mix"
+                default_title = src_title_1
             elif src_title_2:
-                default_title = f"{src_title_2} AI mix"
+                default_title = src_title_2
             resolved_title = (mix_title or "").strip() or default_title
             save_res = (
                 supabase.table("ai_mix")
