@@ -859,15 +859,35 @@ def get_playlist_tracks(playlist_id: str, user_id: str = Depends(verify_user)):
     for r in rows:
         tid = str(r.get("track_id") or "")
         mid = str(r.get("mix_id") or "")
+        is_mix = bool(mid)
+        track_data = track_map.get(tid) if tid else None
+        mix_data = mix_map.get(mid) if mid else None
+
+        if is_mix and mix_data:
+            title = mix_data.get("title") or "AI Mix"
+            artist = "AI DJ"
+            mix_audio_url = mix_data.get("mix_audio_url")
+        elif track_data:
+            title = track_data.get("title")
+            artist = track_data.get("artist")
+            mix_audio_url = None
+        else:
+            title = None
+            artist = None
+            mix_audio_url = None
+
         playlist_items.append({
             "playlist_track_id": r.get("playlist_track_id"),
             "playlist_id": r.get("playlist_id"),
             "track_id": tid or None,
             "mix_id": mid or None,
-            "item_type": "mix" if mid else "track",
+            "item_type": "mix" if is_mix else "track",
+            "title": title,
+            "artist": artist,
+            "mix_audio_url": mix_audio_url,
             "added_at": r.get("added_at"),
-            "track": track_map.get(tid) if tid else None,
-            "mix": mix_map.get(mid) if mid else None,
+            "track": track_data,
+            "mix": mix_data,
         })
 
     return {"playlist_tracks": playlist_items}
@@ -1399,9 +1419,41 @@ async def api_ai_mix(
         mix_id = None
         used_k_value = _to_int_scalar(getattr(result, "used_k", 0), default=0)
         if save_result:
+            # source_track_id로 곡 제목을 조회해서 "곡1 X 곡2 AI mix" 형태로 title 생성
+            src_title_1 = None
+            src_title_2 = None
+            if resolved_source_track_id_1:
+                try:
+                    t1_res = supabase.table("mix_source_track").select("title").eq("mix_track_id", resolved_source_track_id_1).limit(1).execute()
+                    src_title_1 = (t1_res.data[0].get("title") if t1_res.data else None)
+                except Exception:
+                    pass
+                if not src_title_1:
+                    try:
+                        t1_res = supabase.table("track").select("title").eq("track_id", resolved_source_track_id_1).limit(1).execute()
+                        src_title_1 = (t1_res.data[0].get("title") if t1_res.data else None)
+                    except Exception:
+                        pass
+            if resolved_source_track_id_2:
+                try:
+                    t2_res = supabase.table("mix_source_track").select("title").eq("mix_track_id", resolved_source_track_id_2).limit(1).execute()
+                    src_title_2 = (t2_res.data[0].get("title") if t2_res.data else None)
+                except Exception:
+                    pass
+                if not src_title_2:
+                    try:
+                        t2_res = supabase.table("track").select("title").eq("track_id", resolved_source_track_id_2).limit(1).execute()
+                        src_title_2 = (t2_res.data[0].get("title") if t2_res.data else None)
+                    except Exception:
+                        pass
+
             default_title = "AI mix"
-            if source_track_id_1 and source_track_id_2:
-                default_title = f"{source_track_id_1} x {source_track_id_2} AI mix"
+            if src_title_1 and src_title_2:
+                default_title = f"{src_title_1} X {src_title_2} AI mix"
+            elif src_title_1:
+                default_title = f"{src_title_1} AI mix"
+            elif src_title_2:
+                default_title = f"{src_title_2} AI mix"
             resolved_title = (mix_title or "").strip() or default_title
             save_res = (
                 supabase.table("ai_mix")
