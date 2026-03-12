@@ -1352,7 +1352,7 @@ def _resolve_mix_source_track_zip_temp(mix_track_id: str, max_bytes: int) -> tup
         raise HTTPException(status_code=404, detail=f"mix_track_id not found: {resolved_mix_track_id}")
 
     row = response.data[0] or {}
-    row_track_id = (row.get("track_id") or "").strip() or None
+    row_track_id = (row.get("track_id") or "").strip() or resolved_mix_track_id
 
     zip_source_value = None
     for key in ["zip_url", "source_zip_url", "stems_zip_url", "zip_path", "source_zip_path", "stems_zip_path"]:
