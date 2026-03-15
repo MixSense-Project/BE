@@ -129,6 +129,7 @@ class AuthRequest(BaseModel):
 
 class SendOTPRequest(BaseModel):
     email: str
+    type: Literal["signup", "email"] = "signup"
 
 class VerifyOTPRequest(BaseModel):
     email: str
@@ -271,13 +272,18 @@ def signup(req: AuthRequest, authorization: str = Header(None)):
 
 @app.post("/auth/send-otp")
 def send_otp(req: SendOTPRequest):
-    _auth_log("send_otp", "요청", email=req.email)
+    _auth_log("send_otp", "요청", email=req.email, type=req.type)
     try:
-        supabase.auth.sign_in_with_otp({"email": req.email})
-        _auth_log("send_otp", "성공", email=req.email)
+        # Auth API 호출은 anon 키 클라이언트를 사용합니다.
+        # signup: 신규 유저 생성 허용, email: 기존 유저 OTP만 허용
+        supabase_auth.auth.sign_in_with_otp({
+            "email": req.email,
+            "options": {"should_create_user": req.type == "signup"},
+        })
+        _auth_log("send_otp", "성공", email=req.email, type=req.type)
         return {"status": "success", "message": "OTP sent to email"}
     except Exception as e:
-        _auth_log("send_otp", "실패", email=req.email, error=str(e))
+        _auth_log("send_otp", "실패", email=req.email, type=req.type, error=str(e))
         raise HTTPException(status_code=400, detail=str(e))
 
 @app.post("/auth/verify")
@@ -285,7 +291,7 @@ def verify_otp(req: VerifyOTPRequest):
     token = (req.token or "").strip()
     _auth_log("verify", "요청", email=req.email, type=req.type, token_len=len(token))
     try:
-        res = supabase.auth.verify_otp({
+        res = supabase_auth.auth.verify_otp({
             "email": req.email,
             "token": token,
             "type": req.type
@@ -303,7 +309,7 @@ def verify_otp(req: VerifyOTPRequest):
 def login(req: AuthRequest):
     _auth_log("login", "요청", email=req.email)
     try:
-        res = supabase.auth.sign_in_with_password({"email": req.email, "password": req.password})
+        res = supabase_auth.auth.sign_in_with_password({"email": req.email, "password": req.password})
         if not res.session:
             _auth_log("login", "실패", email=req.email, reason="session 없음")
             raise HTTPException(status_code=401, detail="Invalid credentials")
