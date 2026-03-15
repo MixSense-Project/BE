@@ -1403,6 +1403,19 @@ def _build_preview_wav_from_source_zip(source_zip_path: str, duration_sec: float
             y = (y - 128.0) / 128.0
         elif sample_width == 2:
             y = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+        elif sample_width == 3:
+            # 24bit little-endian PCM -> int32 sign extension
+            b = np.frombuffer(raw, dtype=np.uint8)
+            if len(b) % 3 != 0:
+                raise ValueError("Invalid 24-bit PCM byte length")
+            b = b.reshape(-1, 3)
+            i32 = (
+                b[:, 0].astype(np.int32)
+                | (b[:, 1].astype(np.int32) << 8)
+                | (b[:, 2].astype(np.int32) << 16)
+            )
+            i32 = np.where(i32 & 0x800000, i32 - 0x1000000, i32)
+            y = i32.astype(np.float32) / 8388608.0
         elif sample_width == 4:
             y = np.frombuffer(raw, dtype=np.int32).astype(np.float32) / 2147483648.0
         else:
@@ -1418,7 +1431,11 @@ def _build_preview_wav_from_source_zip(source_zip_path: str, duration_sec: float
     with zipfile.ZipFile(source_zip_path, "r") as zf:
         wav_members = [
             name for name in zf.namelist()
-            if name.lower().endswith(".wav") and not name.endswith("/")
+            if name.lower().endswith(".wav")
+            and not name.endswith("/")
+            and not name.startswith("__MACOSX/")
+            and "/._" not in name
+            and not Path(name).name.startswith("._")
         ]
 
         if not wav_members:
