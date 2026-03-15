@@ -26,6 +26,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")  # service_role (DB/관리용)
 # Auth get_user() 검증용: anon 키 사용 시 JWT 서명 검증이 정상 동작함 (service_role만 쓰면 403/invalid signature 발생 가능)
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
 FRONTEND_BASE_URL = os.getenv("FRONTEND_BASE_URL", "https://mixsense.vercel.app")
+LOCAL_FRONTEND_BASE_URL = os.getenv("LOCAL_FRONTEND_BASE_URL", "http://localhost:5173")
 PLAYLIST_COVER_BUCKET = os.getenv("PLAYLIST_COVER_BUCKET", "playlist_covers")
 MIX_TRACKS_BUCKET = os.getenv("MIX_TRACKS_BUCKET", "mix_tracks")
 MIX_SOURCE_TRACKS_BUCKET = os.getenv("MIX_SOURCE_TRACKS_BUCKET", "mix_assets")
@@ -385,12 +386,29 @@ def get_auth_me(
     }
 
 @app.get("/auth/google/start")
-def google_login_start(redirect_to: Optional[str] = Query(default=None)):
+def google_login_start(request: Request, redirect_to: Optional[str] = Query(default=None)):
     """
     구글 OAuth 시작 URL을 반환합니다.
     프론트는 이 URL로 이동하면 Supabase OAuth 플로우가 시작됩니다.
     """
-    resolved_redirect = (redirect_to or "").strip() or f"{FRONTEND_BASE_URL.rstrip('/')}/auth/callback"
+    explicit_redirect = (redirect_to or "").strip()
+    if explicit_redirect:
+        resolved_redirect = explicit_redirect
+    else:
+        # 로컬 프론트에서 호출하면 localhost callback으로 자동 분기합니다.
+        origin = (request.headers.get("origin") or "").lower()
+        referer = (request.headers.get("referer") or "").lower()
+        host = (request.headers.get("host") or "").lower()
+        is_local_front = (
+            "localhost:5173" in origin
+            or "127.0.0.1:5173" in origin
+            or "localhost:5173" in referer
+            or "127.0.0.1:5173" in referer
+            or host.startswith("localhost:")
+            or host.startswith("127.0.0.1:")
+        )
+        base = LOCAL_FRONTEND_BASE_URL if is_local_front else FRONTEND_BASE_URL
+        resolved_redirect = f"{base.rstrip('/')}/auth/callback"
     params = urlencode({
         "provider": "google",
         "redirect_to": resolved_redirect,
