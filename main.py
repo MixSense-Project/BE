@@ -1374,12 +1374,28 @@ def _build_preview_wav_from_source_zip(source_zip_path: str, duration_sec: float
         return np.interp(dst_x, src_x, y.astype(np.float32)).astype(np.float32, copy=False)
 
     def _decode_wav_to_mono_float32(wav_bytes: bytes, dst_sr: int, max_duration_sec: float) -> Any:
+        # 1) soundfile 우선: 24bit/float WAV 등 다양한 포맷 대응
+        try:
+            import soundfile as sf  # type: ignore
+
+            with sf.SoundFile(io.BytesIO(wav_bytes)) as sfh:
+                src_sr = int(sfh.samplerate)
+                max_src_frames = max(1, int(float(max_duration_sec) * float(src_sr)))
+                y = sfh.read(frames=max_src_frames, dtype="float32", always_2d=True)
+            if y is not None and y.size > 0:
+                y = y.mean(axis=1)  # mono
+                y = _resample_linear(y, src_sr=src_sr, dst_sr=dst_sr)
+                return y.astype(np.float32, copy=False)
+        except Exception:
+            pass
+
+        # 2) wave fallback: 단순 PCM WAV 대응
         with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
             n_channels = int(wf.getnchannels())
             sample_width = int(wf.getsampwidth())
             src_sr = int(wf.getframerate())
-            n_frames = int(wf.getnframes())
-            raw = wf.readframes(n_frames)
+            max_src_frames = max(1, int(float(max_duration_sec) * float(src_sr)))
+            raw = wf.readframes(max_src_frames)
 
         if sample_width == 1:
             # 8bit PCM은 unsigned
@@ -1390,16 +1406,13 @@ def _build_preview_wav_from_source_zip(source_zip_path: str, duration_sec: float
         elif sample_width == 4:
             y = np.frombuffer(raw, dtype=np.int32).astype(np.float32) / 2147483648.0
         else:
-            # 24bit 등은 스킵
+            # 24bit packed PCM 등은 soundfile 경로가 아닌 경우 처리 불가
             raise ValueError(f"Unsupported sample width: {sample_width}")
 
         if n_channels > 1:
             y = y.reshape(-1, n_channels).mean(axis=1)
 
         y = _resample_linear(y, src_sr=src_sr, dst_sr=dst_sr)
-        max_len = int(float(max_duration_sec) * float(dst_sr))
-        if max_len > 0 and len(y) > max_len:
-            y = y[:max_len]
         return y.astype(np.float32, copy=False)
 
     with zipfile.ZipFile(source_zip_path, "r") as zf:
