@@ -4,6 +4,7 @@ import json
 import uuid
 import tempfile
 import shutil
+import zipfile
 import requests
 import pandas as pd
 from urllib.parse import urlencode
@@ -1350,6 +1351,112 @@ def get_ai_mix_source_track_detail(mix_track_id: str):
     if not response.data:
         raise HTTPException(status_code=404, detail="mix_track_id not found in mix_source_track")
     return {"source_track": response.data[0]}
+
+def _build_preview_wav_from_source_zip(source_zip_path: str, duration_sec: float = 30.0, target_sr: int = 44100) -> tuple[str, int]:
+    """
+    source.zip 내부의 모든 wav stem을 합산해 preview wav를 생성합니다.
+    반환값: (preview_wav_path, stem_count)
+    """
+    try:
+        import numpy as np
+        import librosa
+        import soundfile as sf
+    except ImportError as e:
+        raise HTTPException(status_code=503, detail=f"Preview dependencies not available: {e}")
+
+    with zipfile.ZipFile(source_zip_path, "r") as zf:
+        wav_members = [
+            name for name in zf.namelist()
+            if name.lower().endswith(".wav") and not name.endswith("/")
+        ]
+
+        if not wav_members:
+            raise HTTPException(status_code=400, detail="No .wav files found in source.zip")
+
+        stems: List[Any] = []
+        max_len = 0
+
+        # 모든 stem을 mono/고정 샘플레이트로 로드 후 길이를 맞춥니다.
+        for member in wav_members:
+            with zf.open(member) as f:
+                stem_bytes = f.read()
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_wav:
+                tmp_wav_path = tmp_wav.name
+                tmp_wav.write(stem_bytes)
+            try:
+                y, _ = librosa.load(
+                    tmp_wav_path,
+                    sr=target_sr,
+                    mono=True,
+                    duration=max(1.0, float(duration_sec)),
+                )
+                if y is None or len(y) == 0:
+                    continue
+                stems.append(y)
+                max_len = max(max_len, len(y))
+            finally:
+                try:
+                    os.remove(tmp_wav_path)
+                except Exception:
+                    pass
+
+        if not stems:
+            raise HTTPException(status_code=400, detail="Failed to decode wav stems from source.zip")
+
+        mix = np.zeros(max_len, dtype=np.float32)
+        for y in stems:
+            mix[: len(y)] += y.astype(np.float32)
+
+        # stem 개수로 1차 감쇠 후, peak 기준으로 안전하게 normalize
+        mix /= float(max(1, len(stems)))
+        peak = float(np.max(np.abs(mix))) if mix.size else 0.0
+        if peak > 0.99:
+            mix = mix / peak * 0.99
+
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as out:
+            out_path = out.name
+        sf.write(out_path, mix, target_sr, subtype="PCM_16")
+        return out_path, len(stems)
+
+@app.get("/api/ai/mix/source-tracks/{mix_track_id}/preview")
+def get_ai_mix_source_track_preview(
+    mix_track_id: str,
+    duration_sec: float = Query(default=30.0, ge=5.0, le=120.0),
+):
+    """
+    mix_source_track의 source.zip 내부 stem wav를 합산해 미리듣기 URL을 반환합니다.
+    """
+    source_zip_path, _ = _resolve_mix_source_track_zip_temp(mix_track_id, max_bytes=AI_MIX_MAX_UPLOAD_BYTES)
+    preview_wav_path = None
+    try:
+        preview_wav_path, stem_count = _build_preview_wav_from_source_zip(
+            source_zip_path,
+            duration_sec=duration_sec,
+            target_sr=44100,
+        )
+
+        preview_storage_path = f"previews/{mix_track_id}/preview.wav"
+        with open(preview_wav_path, "rb") as f:
+            supabase.storage.from_(MIX_TRACKS_BUCKET).upload(
+                path=preview_storage_path,
+                file=f,
+                file_options={"content-type": "audio/wav", "upsert": "true"},
+            )
+        preview_url = supabase.storage.from_(MIX_TRACKS_BUCKET).get_public_url(preview_storage_path)
+        return {
+            "mix_track_id": mix_track_id,
+            "stem_count": stem_count,
+            "duration_sec": duration_sec,
+            "preview_audio_url": preview_url,
+            "preview_audio_path": preview_storage_path,
+        }
+    finally:
+        for p in [source_zip_path, preview_wav_path]:
+            if p:
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
 
 
 def _validate_ai_mix_inputs(zip1: UploadFile, zip2: UploadFile, target_duration: float, target_k: int):
