@@ -27,6 +27,8 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")  # service_role (DB/관리용)
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
 FRONTEND_BASE_URL = os.getenv("FRONTEND_BASE_URL", "https://mixsense.vercel.app")
 LOCAL_FRONTEND_BASE_URL = os.getenv("LOCAL_FRONTEND_BASE_URL", "http://localhost:5173")
+PROD_AUTH_CALLBACK_URL = os.getenv("PROD_AUTH_CALLBACK_URL", f"{FRONTEND_BASE_URL.rstrip('/')}/auth/callback")
+LOCAL_AUTH_CALLBACK_URL = os.getenv("LOCAL_AUTH_CALLBACK_URL", f"{LOCAL_FRONTEND_BASE_URL.rstrip('/')}/auth/callback")
 PLAYLIST_COVER_BUCKET = os.getenv("PLAYLIST_COVER_BUCKET", "playlist_covers")
 MIX_TRACKS_BUCKET = os.getenv("MIX_TRACKS_BUCKET", "mix_tracks")
 MIX_SOURCE_TRACKS_BUCKET = os.getenv("MIX_SOURCE_TRACKS_BUCKET", "mix_assets")
@@ -386,19 +388,30 @@ def get_auth_me(
     }
 
 @app.get("/auth/google/start")
-def google_login_start(request: Request, redirect_to: Optional[str] = Query(default=None)):
+def google_login_start(
+    request: Request,
+    redirect_to: Optional[str] = Query(default=None),
+    env: Optional[str] = Query(default=None),
+):
     """
     구글 OAuth 시작 URL을 반환합니다.
     프론트는 이 URL로 이동하면 Supabase OAuth 플로우가 시작됩니다.
     """
     explicit_redirect = (redirect_to or "").strip()
+    env_hint = (env or "").strip().lower()
     if explicit_redirect:
         resolved_redirect = explicit_redirect
+    elif env_hint in ("local", "dev", "development"):
+        resolved_redirect = LOCAL_AUTH_CALLBACK_URL
+    elif env_hint in ("prod", "production"):
+        resolved_redirect = PROD_AUTH_CALLBACK_URL
     else:
         # 로컬 프론트에서 호출하면 localhost callback으로 자동 분기합니다.
         origin = (request.headers.get("origin") or "").lower()
         referer = (request.headers.get("referer") or "").lower()
         host = (request.headers.get("host") or "").lower()
+        x_forwarded_host = (request.headers.get("x-forwarded-host") or "").lower()
+        x_original_host = (request.headers.get("x-original-host") or "").lower()
         is_local_front = (
             "localhost:5173" in origin
             or "127.0.0.1:5173" in origin
@@ -406,9 +419,12 @@ def google_login_start(request: Request, redirect_to: Optional[str] = Query(defa
             or "127.0.0.1:5173" in referer
             or host.startswith("localhost:")
             or host.startswith("127.0.0.1:")
+            or "localhost:5173" in x_forwarded_host
+            or "127.0.0.1:5173" in x_forwarded_host
+            or "localhost:5173" in x_original_host
+            or "127.0.0.1:5173" in x_original_host
         )
-        base = LOCAL_FRONTEND_BASE_URL if is_local_front else FRONTEND_BASE_URL
-        resolved_redirect = f"{base.rstrip('/')}/auth/callback"
+        resolved_redirect = LOCAL_AUTH_CALLBACK_URL if is_local_front else PROD_AUTH_CALLBACK_URL
     params = urlencode({
         "provider": "google",
         "redirect_to": resolved_redirect,
