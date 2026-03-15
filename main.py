@@ -5,6 +5,8 @@ import uuid
 import tempfile
 import shutil
 import zipfile
+import io
+import wave
 import requests
 import pandas as pd
 from urllib.parse import urlencode
@@ -1359,10 +1361,46 @@ def _build_preview_wav_from_source_zip(source_zip_path: str, duration_sec: float
     """
     try:
         import numpy as np
-        import librosa
-        import soundfile as sf
     except ImportError as e:
-        raise HTTPException(status_code=503, detail=f"Preview dependencies not available: {e}")
+        raise HTTPException(status_code=503, detail=f"Preview dependency not available: {e}")
+
+    def _resample_linear(y: Any, src_sr: int, dst_sr: int) -> Any:
+        if src_sr == dst_sr or len(y) == 0:
+            return y.astype(np.float32, copy=False)
+        ratio = float(dst_sr) / float(src_sr)
+        dst_len = max(1, int(round(len(y) * ratio)))
+        src_x = np.linspace(0.0, 1.0, num=len(y), endpoint=False, dtype=np.float64)
+        dst_x = np.linspace(0.0, 1.0, num=dst_len, endpoint=False, dtype=np.float64)
+        return np.interp(dst_x, src_x, y.astype(np.float32)).astype(np.float32, copy=False)
+
+    def _decode_wav_to_mono_float32(wav_bytes: bytes, dst_sr: int, max_duration_sec: float) -> Any:
+        with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
+            n_channels = int(wf.getnchannels())
+            sample_width = int(wf.getsampwidth())
+            src_sr = int(wf.getframerate())
+            n_frames = int(wf.getnframes())
+            raw = wf.readframes(n_frames)
+
+        if sample_width == 1:
+            # 8bit PCM은 unsigned
+            y = np.frombuffer(raw, dtype=np.uint8).astype(np.float32)
+            y = (y - 128.0) / 128.0
+        elif sample_width == 2:
+            y = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+        elif sample_width == 4:
+            y = np.frombuffer(raw, dtype=np.int32).astype(np.float32) / 2147483648.0
+        else:
+            # 24bit 등은 스킵
+            raise ValueError(f"Unsupported sample width: {sample_width}")
+
+        if n_channels > 1:
+            y = y.reshape(-1, n_channels).mean(axis=1)
+
+        y = _resample_linear(y, src_sr=src_sr, dst_sr=dst_sr)
+        max_len = int(float(max_duration_sec) * float(dst_sr))
+        if max_len > 0 and len(y) > max_len:
+            y = y[:max_len]
+        return y.astype(np.float32, copy=False)
 
     with zipfile.ZipFile(source_zip_path, "r") as zf:
         wav_members = [
@@ -1380,25 +1418,19 @@ def _build_preview_wav_from_source_zip(source_zip_path: str, duration_sec: float
         for member in wav_members:
             with zf.open(member) as f:
                 stem_bytes = f.read()
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_wav:
-                tmp_wav_path = tmp_wav.name
-                tmp_wav.write(stem_bytes)
             try:
-                y, _ = librosa.load(
-                    tmp_wav_path,
-                    sr=target_sr,
-                    mono=True,
-                    duration=max(1.0, float(duration_sec)),
+                y = _decode_wav_to_mono_float32(
+                    stem_bytes,
+                    dst_sr=target_sr,
+                    max_duration_sec=max(1.0, float(duration_sec)),
                 )
                 if y is None or len(y) == 0:
                     continue
                 stems.append(y)
                 max_len = max(max_len, len(y))
-            finally:
-                try:
-                    os.remove(tmp_wav_path)
-                except Exception:
-                    pass
+            except Exception:
+                # 일부 stem 포맷이 비표준일 수 있어 실패 stem은 건너뜁니다.
+                continue
 
         if not stems:
             raise HTTPException(status_code=400, detail="Failed to decode wav stems from source.zip")
@@ -1413,9 +1445,15 @@ def _build_preview_wav_from_source_zip(source_zip_path: str, duration_sec: float
         if peak > 0.99:
             mix = mix / peak * 0.99
 
+        pcm16 = np.clip(mix, -1.0, 1.0)
+        pcm16 = (pcm16 * 32767.0).astype(np.int16, copy=False)
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as out:
             out_path = out.name
-        sf.write(out_path, mix, target_sr, subtype="PCM_16")
+        with wave.open(out_path, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)  # 16bit PCM
+            wf.setframerate(target_sr)
+            wf.writeframes(pcm16.tobytes())
         return out_path, len(stems)
 
 @app.get("/api/ai/mix/source-tracks/{mix_track_id}/preview")
@@ -1426,9 +1464,10 @@ def get_ai_mix_source_track_preview(
     """
     mix_source_track의 source.zip 내부 stem wav를 합산해 미리듣기 URL을 반환합니다.
     """
-    source_zip_path, _ = _resolve_mix_source_track_zip_temp(mix_track_id, max_bytes=AI_MIX_MAX_UPLOAD_BYTES)
+    source_zip_path = None
     preview_wav_path = None
     try:
+        source_zip_path, _ = _resolve_mix_source_track_zip_temp(mix_track_id, max_bytes=AI_MIX_MAX_UPLOAD_BYTES)
         preview_wav_path, stem_count = _build_preview_wav_from_source_zip(
             source_zip_path,
             duration_sec=duration_sec,
@@ -1450,6 +1489,10 @@ def get_ai_mix_source_track_preview(
             "preview_audio_url": preview_url,
             "preview_audio_path": preview_storage_path,
         }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to build preview: {e}")
     finally:
         for p in [source_zip_path, preview_wav_path]:
             if p:
