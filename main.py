@@ -6,6 +6,7 @@ import tempfile
 import shutil
 import requests
 import pandas as pd
+from urllib.parse import urlencode
 from pathlib import Path
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Header, Depends, UploadFile, File, Query, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,6 +25,7 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")  # service_role (DB/관리용)
 # Auth get_user() 검증용: anon 키 사용 시 JWT 서명 검증이 정상 동작함 (service_role만 쓰면 403/invalid signature 발생 가능)
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
+FRONTEND_BASE_URL = os.getenv("FRONTEND_BASE_URL", "https://mixsense.vercel.app")
 PLAYLIST_COVER_BUCKET = os.getenv("PLAYLIST_COVER_BUCKET", "playlist_covers")
 MIX_TRACKS_BUCKET = os.getenv("MIX_TRACKS_BUCKET", "mix_tracks")
 MIX_SOURCE_TRACKS_BUCKET = os.getenv("MIX_SOURCE_TRACKS_BUCKET", "mix_assets")
@@ -318,6 +320,24 @@ def login(req: AuthRequest):
     except Exception as e:
         _auth_log("login", "실패", email=req.email, error=str(e))
         raise HTTPException(status_code=401, detail=str(e))
+
+@app.get("/auth/google/start")
+def google_login_start(redirect_to: Optional[str] = Query(default=None)):
+    """
+    구글 OAuth 시작 URL을 반환합니다.
+    프론트는 이 URL로 이동하면 Supabase OAuth 플로우가 시작됩니다.
+    """
+    resolved_redirect = (redirect_to or "").strip() or f"{FRONTEND_BASE_URL.rstrip('/')}/auth/callback"
+    params = urlencode({
+        "provider": "google",
+        "redirect_to": resolved_redirect,
+    })
+    authorize_url = f"{SUPABASE_URL.rstrip('/')}/auth/v1/authorize?{params}"
+    return {
+        "provider": "google",
+        "authorize_url": authorize_url,
+        "redirect_to": resolved_redirect,
+    }
 
 @app.post("/auth/logout")
 def logout_user(authorization: str = Header(None)):
