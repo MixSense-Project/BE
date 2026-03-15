@@ -235,6 +235,23 @@ def _auth_log(tag: str, msg: str, **kwargs):
     extra = " | ".join(f"{k}={v}" for k, v in kwargs.items() if k != "password")
     print(f"[AUTH] {tag} | {msg}" + (f" | {extra}" if extra else ""))
 
+def _extract_provider_from_user(user_obj: Any) -> str:
+    """Supabase user 객체에서 로그인 provider를 추출합니다."""
+    try:
+        app_md = getattr(user_obj, "app_metadata", None) or {}
+        user_md = getattr(user_obj, "user_metadata", None) or {}
+        provider = app_md.get("provider") or user_md.get("provider")
+        if isinstance(provider, str) and provider.strip():
+            return provider.strip().lower()
+        providers = app_md.get("providers")
+        if isinstance(providers, list) and providers:
+            first = str(providers[0] or "").strip().lower()
+            if first:
+                return first
+    except Exception:
+        pass
+    return "email"
+
 @app.post("/auth/signup")
 def signup(req: AuthRequest, authorization: str = Header(None)):
     _auth_log("signup", "요청", email=req.email, username=req.username or "")
@@ -320,6 +337,52 @@ def login(req: AuthRequest):
     except Exception as e:
         _auth_log("login", "실패", email=req.email, error=str(e))
         raise HTTPException(status_code=401, detail=str(e))
+
+@app.get("/auth/me")
+def get_auth_me(
+    user_id: str = Depends(verify_user),
+    authorization: str = Header(None),
+):
+    """현재 로그인 사용자의 인증/프로필 정보를 조회합니다."""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid token")
+    token = authorization.split(" ")[1].strip()
+
+    auth_user_res = supabase_auth.auth.get_user(token)
+    auth_user = getattr(auth_user_res, "user", None)
+    if not auth_user:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    profile_res = (
+        supabase.table("profiles")
+        .select("display_name, favorite_genres, favorite_artists")
+        .eq("user_id", user_id)
+        .limit(1)
+        .execute()
+    )
+    profile = (profile_res.data or [{}])[0]
+
+    favorite_genres = [str(x) for x in (profile.get("favorite_genres") or [])]
+    favorite_artists = [str(x) for x in (profile.get("favorite_artists") or [])]
+    has_preferences = bool(favorite_genres or favorite_artists)
+
+    user_metadata = getattr(auth_user, "user_metadata", None) or {}
+    username = (
+        profile.get("display_name")
+        or user_metadata.get("username")
+        or user_metadata.get("display_name")
+        or (str(getattr(auth_user, "email", "")).split("@")[0] if getattr(auth_user, "email", None) else None)
+    )
+
+    return {
+        "id": user_id,
+        "email": getattr(auth_user, "email", None),
+        "username": username,
+        "provider": _extract_provider_from_user(auth_user),
+        "has_preferences": has_preferences,
+        "favorite_genres": favorite_genres,
+        "favorite_artists": favorite_artists,
+    }
 
 @app.get("/auth/google/start")
 def google_login_start(redirect_to: Optional[str] = Query(default=None)):
