@@ -725,13 +725,48 @@ def delete_from_mylist(profile_id: str, content_id: str, user_id: str = Depends(
     return {"status": "deleted"}
 
 @app.post("/user/toggle_like")
-def toggle_like_custom(req: MyListReq, user_id: str = Depends(verify_user)):
-    verify_profile_ownership(req.profile_id, user_id)
-    existing = supabase.table("likes").select("*").eq("user_id", req.profile_id).eq("track_id", req.track_id).execute()
+async def toggle_like_custom(request: Request, user_id: str = Depends(verify_user)):
+    """
+    좋아요 토글 API
+    - 다양한 프론트 payload 키를 유연하게 허용합니다.
+    - profile_id가 없으면 현재 로그인 user_id를 기본값으로 사용합니다.
+    """
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+
+    def _pick(*keys: str) -> Optional[Any]:
+        for k in keys:
+            if k in payload and payload.get(k) is not None:
+                return payload.get(k)
+        return None
+
+    raw_profile_id = _pick("profile_id", "profileId", "user_id", "userId")
+    profile_id = str(raw_profile_id or user_id).strip()
+
+    raw_track = _pick("track_id", "trackId", "content_id", "contentId", "track", "content")
+    track_id = None
+    if isinstance(raw_track, dict):
+        for k in ("track_id", "trackId", "id", "content_id", "contentId"):
+            v = raw_track.get(k)
+            if v:
+                track_id = str(v).strip()
+                break
+    elif raw_track is not None:
+        track_id = str(raw_track).strip()
+
+    if not profile_id:
+        raise HTTPException(status_code=400, detail="profile_id is required")
+    if not track_id:
+        raise HTTPException(status_code=400, detail="track_id is required")
+
+    verify_profile_ownership(profile_id, user_id)
+    existing = supabase.table("likes").select("*").eq("user_id", profile_id).eq("track_id", track_id).execute()
     if existing.data:
-        supabase.table("likes").delete().eq("user_id", req.profile_id).eq("track_id", req.track_id).execute()
+        supabase.table("likes").delete().eq("user_id", profile_id).eq("track_id", track_id).execute()
         return {"status": "unliked"}
-    supabase.table("likes").insert({"user_id": req.profile_id, "track_id": req.track_id}).execute()
+    supabase.table("likes").insert({"user_id": profile_id, "track_id": track_id}).execute()
     return {"status": "liked"}
 
 # ==========================================
