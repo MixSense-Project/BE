@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 from supabase import create_client, Client
 
 # 기존 파이프라인 모듈
-from track_data_pipeline import run_pipeline, get_spotify_token
+from track_data_pipeline import run_pipeline, get_spotify_token, get_youtube_video_id
 
 load_dotenv()
 SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
@@ -1140,19 +1140,70 @@ def search_spotify(query: str, limit: int = 5):
 
     # track 테이블의 youtube_video_id를 함께 내려주기 위해 Spotify track_id로 매핑 조회
     track_ids = [item.get("id") for item in items if item.get("id")]
-    youtube_map = {}
+    existing_track_map = {}
     if track_ids:
-        meta_res = supabase.table("track").select("track_id, youtube_video_id").in_("track_id", track_ids).execute()
+        meta_res = (
+            supabase.table("track")
+            .select("track_id, youtube_video_id, title, artist, artist_id, popularity, release_date, track_image_url")
+            .in_("track_id", track_ids)
+            .execute()
+        )
         for row in (meta_res.data or []):
-            youtube_map[str(row.get("track_id"))] = row.get("youtube_video_id")
+            tid = str(row.get("track_id") or "")
+            if tid:
+                existing_track_map[tid] = row
 
-    results = [{
-        "track_id": item["id"],
-        "title": item["name"],
-        "artist": item["artists"][0]["name"] if item.get("artists") else "",
-        "track_image_url": item.get("album", {}).get("images", [{}])[0].get("url"),
-        "youtube_video_id": youtube_map.get(str(item.get("id"))),
-    } for item in items]
+    upsert_rows: List[dict] = []
+    results = []
+    for item in items:
+        tid = str(item.get("id") or "").strip()
+        if not tid:
+            continue
+
+        title = str(item.get("name") or "").strip()
+        artists = item.get("artists") or []
+        artist = str(artists[0].get("name") or "").strip() if artists else ""
+        artist_id = str(artists[0].get("id") or "").strip() if artists else ""
+        popularity = int(item.get("popularity") or 0)
+        release_date = str(item.get("album", {}).get("release_date") or "").strip() or None
+        album_images = item.get("album", {}).get("images", []) or []
+        track_image_url = (album_images[0].get("url") if album_images else None)
+
+        existing = existing_track_map.get(tid) or {}
+        youtube_video_id = (existing.get("youtube_video_id") or "").strip() or None
+        if not youtube_video_id and title and artist:
+            # 검색 직후 재생 가능성을 높이기 위해 YouTube ID를 즉시 보강합니다.
+            try:
+                youtube_video_id = get_youtube_video_id(title, artist)
+            except Exception:
+                youtube_video_id = None
+
+        # 검색 결과를 track 테이블에 upsert (신규 곡 자동 적재 + youtube_video_id 보강)
+        upsert_rows.append({
+            "track_id": tid,
+            "title": title or (existing.get("title") or ""),
+            "artist": artist or (existing.get("artist") or ""),
+            "artist_id": artist_id or (existing.get("artist_id") or None),
+            "popularity": popularity if popularity is not None else existing.get("popularity"),
+            "release_date": release_date or existing.get("release_date"),
+            "track_image_url": track_image_url or existing.get("track_image_url"),
+            "youtube_video_id": youtube_video_id or existing.get("youtube_video_id"),
+        })
+
+        results.append({
+            "track_id": tid,
+            "title": title,
+            "artist": artist,
+            "track_image_url": track_image_url,
+            "youtube_video_id": youtube_video_id,
+            "thumbnail_url": (f"https://i.ytimg.com/vi/{youtube_video_id}/hqdefault.jpg" if youtube_video_id else None),
+        })
+
+    if upsert_rows:
+        try:
+            supabase.table("track").upsert(upsert_rows, on_conflict="track_id").execute()
+        except Exception as e:
+            print(f"[GET /api/search] track upsert warning: {e}")
     
     return {"results": results}
 
