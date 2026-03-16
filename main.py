@@ -1124,7 +1124,7 @@ def run_pipeline_background(tracks: List[TrackRequest]):
         print(f"Pipeline error: {e}")
 
 @app.get("/api/search")
-def search_spotify(query: str, limit: int = 5):
+def search_spotify(query: str, limit: int = 5, background_tasks: BackgroundTasks = None):
     limit = max(1, min(50, limit))
     token = get_spotify_token()
     search_url = "https://api.spotify.com/v1/search"
@@ -1138,13 +1138,13 @@ def search_spotify(query: str, limit: int = 5):
     data = response.json()
     items = data.get("tracks", {}).get("items", [])
 
-    # track 테이블의 youtube_video_id를 함께 내려주기 위해 Spotify track_id로 매핑 조회
+    # track 테이블의 메타를 함께 내려주기 위해 Spotify track_id로 매핑 조회
     track_ids = [item.get("id") for item in items if item.get("id")]
     existing_track_map = {}
     if track_ids:
         meta_res = (
             supabase.table("track")
-            .select("track_id, youtube_video_id, title, artist, artist_id, popularity, release_date, track_image_url")
+            .select("track_id, youtube_video_id, title, artist, artist_id, popularity, release_date, duration_ms, genre, sub_genre, track_image_url")
             .in_("track_id", track_ids)
             .execute()
         )
@@ -1154,6 +1154,7 @@ def search_spotify(query: str, limit: int = 5):
                 existing_track_map[tid] = row
 
     upsert_rows: List[dict] = []
+    enrich_candidates: List[tuple[str, str]] = []
     results = []
     for item in items:
         tid = str(item.get("id") or "").strip()
@@ -1165,6 +1166,7 @@ def search_spotify(query: str, limit: int = 5):
         artist = str(artists[0].get("name") or "").strip() if artists else ""
         artist_id = str(artists[0].get("id") or "").strip() if artists else ""
         popularity = int(item.get("popularity") or 0)
+        duration_ms = int(item.get("duration_ms") or 0) or None
         release_date = str(item.get("album", {}).get("release_date") or "").strip() or None
         album_images = item.get("album", {}).get("images", []) or []
         track_image_url = (album_images[0].get("url") if album_images else None)
@@ -1185,6 +1187,7 @@ def search_spotify(query: str, limit: int = 5):
             "artist": artist or (existing.get("artist") or ""),
             "artist_id": artist_id or (existing.get("artist_id") or None),
             "popularity": popularity if popularity is not None else existing.get("popularity"),
+            "duration_ms": duration_ms or existing.get("duration_ms"),
             "release_date": release_date or existing.get("release_date"),
             "track_image_url": track_image_url or existing.get("track_image_url"),
             "youtube_video_id": youtube_video_id or existing.get("youtube_video_id"),
@@ -1194,16 +1197,28 @@ def search_spotify(query: str, limit: int = 5):
             "track_id": tid,
             "title": title,
             "artist": artist,
+            "duration_ms": duration_ms,
             "track_image_url": track_image_url,
             "youtube_video_id": youtube_video_id,
             "thumbnail_url": (f"https://i.ytimg.com/vi/{youtube_video_id}/hqdefault.jpg" if youtube_video_id else None),
         })
+
+        # 추천 품질에 영향을 주는 메타(genre/sub_genre)가 비어있으면 파이프라인 보강 후보로 등록
+        if title and artist:
+            if not (existing.get("genre") or "").strip() or not (existing.get("sub_genre") or "").strip():
+                enrich_candidates.append((title, artist))
 
     if upsert_rows:
         try:
             supabase.table("track").upsert(upsert_rows, on_conflict="track_id").execute()
         except Exception as e:
             print(f"[GET /api/search] track upsert warning: {e}")
+
+    # 검색 직후 부족한 메타를 백그라운드 파이프라인으로 보강합니다.
+    if background_tasks and enrich_candidates:
+        deduped = list(dict.fromkeys(enrich_candidates))[:20]  # 과도한 호출 방지
+        track_reqs = [TrackRequest(title=t, artist=a) for t, a in deduped]
+        background_tasks.add_task(run_pipeline_background, track_reqs)
     
     return {"results": results}
 
