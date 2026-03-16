@@ -174,7 +174,10 @@ class TrackRequest(BaseModel):
     artist: str
 
 class PlayLogRequest(BaseModel):
-    track_id: str
+    track_id: str = Field(
+        validation_alias=AliasChoices("track_id", "content_id"),
+        serialization_alias="track_id",
+    )
     ms_played: int
 
 class AISearchRequest(BaseModel):
@@ -733,11 +736,28 @@ def toggle_like_custom(req: MyListReq, user_id: str = Depends(verify_user)):
 # ==========================================
 @app.post("/api/logs/play")
 def record_play_log(log: PlayLogRequest, user_id: str = Depends(verify_user)):
-    supabase.table("play_logs").insert({
-        "user_id": user_id,
-        "track_id": log.track_id,
-        "ms_played": log.ms_played
-    }).execute()
+    track_id = (log.track_id or "").strip()
+    if not track_id:
+        raise HTTPException(status_code=400, detail="track_id is required")
+
+    track_check = (
+        supabase.table("track")
+        .select("track_id")
+        .eq("track_id", track_id)
+        .limit(1)
+        .execute()
+    )
+    if not track_check.data:
+        raise HTTPException(status_code=400, detail=f"track_id not found in track table: {track_id}")
+
+    try:
+        supabase.table("play_logs").insert({
+            "user_id": user_id,
+            "track_id": track_id,
+            "ms_played": max(0, int(log.ms_played)),
+        }).execute()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"failed to insert play log: {e}")
     return {"status": "success"}
 
 # ==========================================
