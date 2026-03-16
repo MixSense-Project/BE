@@ -163,9 +163,12 @@ class ProfileEditByNameReq(BaseModel):
     updated: dict
 
 class MyListReq(BaseModel):
-    profile_id: str
+    profile_id: str = Field(
+        validation_alias=AliasChoices("profile_id", "profileId", "user_id", "userId"),
+        serialization_alias="profile_id",
+    )
     track_id: str = Field(
-        validation_alias=AliasChoices("track_id", "content_id"),
+        validation_alias=AliasChoices("track_id", "trackId", "content_id", "contentId"),
         serialization_alias="track_id",
     )
 
